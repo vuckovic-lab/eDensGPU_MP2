@@ -1,4 +1,4 @@
-# edens_mp2_gpu
+# MP2_edens_GPU
 
 Regularized MP2 correlation energy density generator for GPU-based implementation. Obtains correlation energies and correlation energy densities per particle for all spin channels of open- and closed-shell chemical systems. Requires PySCF molecular object and SCF resolution. 
 

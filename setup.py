@@ -6,7 +6,7 @@ from setuptools import setup
 
 
 setup(
-    name="edens-gpu-mp2",
+    name="MP2_edens_GPU",
     version="1.0",
     description="MP2 energy density generator for GPU-based implementation",
     long_description=Path(__file__).with_name("README.md").read_text(encoding="utf-8"),
@@ -19,5 +19,5 @@ setup(
         "h5py==3.14.0", "opt_einsum==3.4.0",
         "gpu4pyscf-cuda12x==1.8.1", "cupy-cuda12x==13.4.1", "cutensor-cu12==2.2.0",
     ],
-    data_files=[("share/edens_gpu_mp2", ["example_colab.ipynb"])],
+    data_files=[("share/MP2_edens_GPU", ["example_colab.ipynb"])],
 )
