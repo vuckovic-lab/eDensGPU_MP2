@@ -13,7 +13,7 @@ setup(
     long_description_content_type="text/markdown",
     license_files=["LICENSE*"],
     python_requires=">=3.11,<3.13",
-    packages=["edens_mp2"],
+    packages=["mp2_edens"],
     install_requires=[
         "psutil>=5.9", "pyscf==2.14.0", "numpy==1.26.4", "scipy==1.15.3",
         "h5py==3.14.0", "opt_einsum==3.4.0",

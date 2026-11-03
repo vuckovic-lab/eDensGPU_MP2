@@ -1,6 +1,4 @@
-"""Internal float64 strat1 kernels, consolidated from edens_all_gpu.
-
-Sections follow the data flow: orbitals, storage, density/integrals, and MP2.
+"""Sections follow the data flow: orbitals, storage, density/integrals, and MP2.
 Contraction order, CUDA kernels, and GPU/RAM/disk planning are retained.
 The host-output adapters derive from GPU4PySCF (Apache-2.0; see LICENSE_GPU4PYSCF).
 Only the public generator in __init__.py is intended for normal use.
@@ -214,7 +212,7 @@ class HostArena:
         self.peak = 0
         self.disk_live = 0
         self.disk_peak = 0
-        self.directory = Path(tempfile.mkdtemp(prefix="edens-mp2-", dir=directory))
+        self.directory = Path(tempfile.mkdtemp(prefix="mp2-edens-", dir=directory))
         self.stores = []
 
     @property
@@ -1171,7 +1169,7 @@ def df_fields(
     host_mem_gb=None,
     progress=False,
 ):
-    """Evaluate regularized OS/SS strat1 fields with a bounded CuPy pool."""
+    """Evaluate regularized OS/SS fields with a bounded CuPy pool."""
     validate_memory(gpu_mem_gb, host_mem_gb)
     ks = (float(kappa),)
     requests = [("kmp2", ks[0], ("os", "ss"))]
@@ -1181,7 +1179,7 @@ def df_fields(
     free = cp.cuda.runtime.memGetInfo()[0]
     budget = int(0.8 * free) if gpu_mem_gb is None else int(float(gpu_mem_gb) * 1e9)
     if budget <= 0 or budget > free:
-        raise MemoryError(f"strat1 requested {budget/1e9:.3f} GB; only {free/1e9:.3f} GB free")
+        raise MemoryError(f"Evaluation requested {budget/1e9:.3f} GB; only {free/1e9:.3f} GB free")
     pool = TrackedPool(cp, budget)
     try:
         with cp.cuda.using_allocator(pool.malloc):
@@ -1485,7 +1483,7 @@ def accumulate(
                         stats["factor_upload_bytes"] += fj.nbytes
                     if progress:
                         print(
-                            f'Strategy 1 partner block {j0//p["j"]+1}/{ceil(no2/p["j"])}; occupied {i0+1}-{i1}',
+                            f'Partner block {j0//p["j"]+1}/{ceil(no2/p["j"])}; occupied {i0+1}-{i1}',
                             flush=True,
                         )
                     for ii in range(count):
@@ -1618,7 +1616,7 @@ def accumulate(
             if progress:
                 done = stats["disk_observation_batches"]
                 print(
-                    f'Strategy 1 observation batch {done+1}/{done+plan["observation_batches"]}: spin {s+1}, occupied {i0+1}-{i0+count}/{no}',
+                    f'Observation batch {done+1}/{done+plan["observation_batches"]}: spin {s+1}, occupied {i0+1}-{i0+count}/{no}',
                     flush=True,
                 )
             try:
@@ -1636,7 +1634,7 @@ def accumulate(
                     )
                 if progress:
                     print(
-                        "Strategy 1 allocation retry: smaller uncommitted observation/partner batch",
+                        "Allocation retry: smaller uncommitted observation/partner batch",
                         flush=True,
                     )
                 continue
@@ -1651,7 +1649,7 @@ def accumulate(
     return kstores, analytic
 
 
-# Streamed strat1 evaluation
+# Streamed evaluation
 # ----------------------------------------------------------------------------
 
 
@@ -2177,7 +2175,7 @@ def _accumulate_group(
                 )
                 if progress:
                     print(
-                        f'Strategy 1 pair plan: {plan["total_blocks_per_observation"]} blocks per observation; j/a/b = {plan["j"]}/{plan["a"]}/{plan["b"]}',
+                        f'Pair plan: {plan["total_blocks_per_observation"]} blocks per observation; j/a/b = {plan["j"]}/{plan["a"]}/{plan["b"]}',
                         flush=True,
                     )
             j0 = 0
@@ -2274,7 +2272,7 @@ def _accumulate_group(
                 continue
             for i in range(no):
                 if progress:
-                    print(f"Strategy 1 kernels: spin {s+1}, occupied {i+1}/{no}", flush=True)
+                    print(f"Kernels: spin {s+1}, occupied {i+1}/{no}", flush=True)
                 fraction = 1.0
                 while True:
                     try:
@@ -2297,7 +2295,7 @@ def _accumulate_group(
                         raise MemoryError("MP2 minimum contraction tile cannot fit the GPU budget")
                     if progress:
                         print(
-                            f"Strategy 1 allocation retry: occupied {i+1}, smaller pair blocks",
+                            f"Allocation retry: occupied {i+1}, smaller pair blocks",
                             flush=True,
                         )
     finally:
@@ -2377,7 +2375,7 @@ def _grid_group(
         )
         if progress:
             print(
-                f"Strategy 1 grid: occupied {i0+1}-{i1}/{co[s].shape[1]}; {ceil(len(coords)/rblock)} r blocks",
+                f"Grid: occupied {i0+1}-{i1}/{co[s].shape[1]}; {ceil(len(coords)/rblock)} r blocks",
                 flush=True,
             )
         # Commit this occupied block only after its complete field is available.
@@ -2424,7 +2422,7 @@ def _grid_group(
                     stats["grid_blocks_evaluated"] += 1
                     if progress:
                         print(
-                            f"Strategy 1 r block {completed}/{completed+ceil((len(coords)-start)/rblock)}; occupied {i0+1}-{i1}",
+                            f"r block {completed}/{completed+ceil((len(coords)-start)/rblock)}; occupied {i0+1}-{i1}",
                             flush=True,
                         )
                     del ao, po, pv, block_values, copied, value, potential
@@ -2441,7 +2439,7 @@ def _grid_group(
                 _clear(engine, pool)
                 if progress:
                     print(
-                        f"Strategy 1 grid allocation retry at point {start}: r block {rblock}",
+                        f"Grid allocation retry at point {start}: r block {rblock}",
                         flush=True,
                     )
         return local
@@ -2506,7 +2504,7 @@ def _grid_group(
                 gc.collect()
                 _clear(engine, pool)
                 if progress:
-                    print(f"Strategy 1 grid retry: occupied block {ik}", flush=True)
+                    print(f"Grid retry: occupied block {ik}", flush=True)
             i0 += ik
     _clear(engine, pool)
 
@@ -2571,7 +2569,7 @@ def streamed_fields(
         for group_index, group in enumerate(groups):
             if progress:
                 print(
-                    f'Strategy 1 channel group {stats["groups_done"]+1}/{len(groups)}: {group}',
+                    f'Channel group {stats["groups_done"]+1}/{len(groups)}: {group}',
                     flush=True,
                 )
             t = perf_counter()
@@ -2648,7 +2646,6 @@ def streamed_fields(
             )
     engine.sync()
     meta = dict(
-        strategy="strat1",
         amplitude_integrals="Coulomb-metric DF",
         spatial_representation="original observation orbital product",
         precision="float64",

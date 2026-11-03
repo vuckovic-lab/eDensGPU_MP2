@@ -11,7 +11,7 @@ __all__ = ["ec_mp2_gen", "make_grid"]
 
 
 def make_grid(mol, level=3):
-    """Return (coordinates in bohr, weights) using the parent's Becke recipe."""
+    """Return (coordinates in bohr, weights) using the PySCF-based Becke generation."""
     from pyscf.dft import radi
 
     grid = dft.gen_grid.Grids(mol)
@@ -27,18 +27,13 @@ def make_grid(mol, level=3):
 
 
 class ec_mp2_gen:
-    """Run GPU strat1 κMP2 and retain total and opposite-spin results.
+    """Run κMP2 energy density generator and retain total and opposite-spin results.
 
-    ``tot`` and ``os`` are Python floats in Hartree.
-    ``dens_tot`` and ``dens_os`` are float64 CuPy
-    arrays in Hartree per particle, normalized by the total density.
-    For example, ``tot = cupy.sum(rho * weights * dens_tot)``.
+    ``tot`` and ``os`` are energies in Hartree.
+    ``dens_tot`` and ``dens_os`` are energy densities per particle (float64 CuPyarrays).
     ``rho``, ``weights`` and ``coords`` are also float64 CuPy arrays.
 
-    Supply converged real RHF, UHF or CUHF orbitals; SCF is not rerun.
-    ``grid`` accepts coordinates (N,3) with separate weights (N,), or a built
-    PySCF Grids object. Memory allowances are decimal GB; None retains the
-    parent's automatic planning. A CUDA GPU is required; no CPU fallback.
+    Supply converged SCF orbitals. A CUDA GPU is required; no CPU fallback.
     """
 
     def __init__(
@@ -138,14 +133,13 @@ class ec_mp2_gen:
 
 
 def _evaluate(mf, coords, kappa, auxbasis, gpu_mem_gb, host_mem_gb, verbose):
-    """Device workspaces die here, before the caller releases its private pool."""
     engine = _core.Engine(mf, gpu_mem_gb=gpu_mem_gb)
     points = engine.xp.asarray(coords)
     # Preserve the parent's density contractions and native AO ordering.
     semilocal = engine.semilocal(points)
     density = _core.host(semilocal["rho"]).sum(0)
     if verbose:
-        print(f"Evaluating κMP2 strat1 on {len(coords)} grid points ...", flush=True)
+        print(f"Evaluating on {len(coords)} grid points ...", flush=True)
     fields = _core.df_fields(
         engine,
         points,

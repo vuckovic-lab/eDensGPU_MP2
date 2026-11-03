@@ -19,7 +19,7 @@ See the `example_colab.ipynb` example notebook for installation on Google Colab 
 Given a SCF converged `mf` and its PySCF molecule `mol`:
 
 ```python
-from edens_mp2 import ec_mp2_gen, make_grid
+from mp2_edens import ec_mp2_gen, make_grid
 
 coords, weights = make_grid(mol, level=3)
 ec_out = ec_mp2_gen(mf, mol, coords, weights,
@@ -47,8 +47,8 @@ print(f"SS:    {ec_out.tot-ec_out.ss}")
 ## Files
 
 - [example_colab.ipynb](example_colab.ipynb): pip installation, molecule/SCF setup and evaluation.
-- `edens_mp2/__init__.py`: the result/generator class and `make_grid`.
-- `edens_mp2/_core.py`: GPU kernels and memory planning.
+- `mp2_edens/__init__.py`: the result/generator class and `make_grid`.
+- `mp2_edens/_core.py`: GPU kernels and memory planning.
 
 
 ## Reference
