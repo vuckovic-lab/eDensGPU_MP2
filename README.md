@@ -40,7 +40,7 @@ The returned class-object contains:
 For same-spin (ss) correlation energies and correlation energy densities per particle simply subtract the os part from the total results:
 
 ```python
-print(f"SS:    {ec_out.tot-ec_out.ss}")
+print(f"SS:    {ec_out.tot-ec_out.os}")
 ```
 
 
