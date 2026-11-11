@@ -69,6 +69,4 @@ license does not replace them.
 
 ## Contact
 
-- Author: Elias Polak — [Elias-Py09 on GitHub](https://github.com/Elias-Py09).
-
-- Research group: [Vuckovic group](https://www.stefanvuckovic.com/).
+Research group: [Vuckovic group](https://www.stefanvuckovic.com/).
