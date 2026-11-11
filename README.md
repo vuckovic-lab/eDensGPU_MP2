@@ -1,8 +1,8 @@
-# MP2_edens_GPU
+# eDensGPU_MP2
 
 Regularized MP2 correlation energy density generator for GPU-based implementation. Obtains correlation energies and correlation energy densities per particle for all spin channels of open- and closed-shell chemical systems. Requires PySCF molecular object and SCF resolution. 
 
-Version: 1.0 
+Version: 1.1 
 
 ## Install
 
@@ -19,7 +19,7 @@ See the `example_colab.ipynb` example notebook for installation on Google Colab 
 Given a SCF converged `mf` and its PySCF molecule `mol`:
 
 ```python
-from mp2_edens import ec_mp2_gen, make_grid
+from eDens_mp2 import ec_mp2_gen, make_grid
 
 coords, weights = make_grid(mol, level=3)
 ec_out = ec_mp2_gen(mf, mol, coords, weights,
@@ -47,8 +47,8 @@ print(f"SS:    {ec_out.tot-ec_out.ss}")
 ## Files
 
 - [example_colab.ipynb](example_colab.ipynb): pip installation, molecule/SCF setup and evaluation.
-- `mp2_edens/__init__.py`: the result/generator class and `make_grid`.
-- `mp2_edens/_core.py`: GPU kernels and memory planning.
+- `__init__.py`: package-level exports for the result/generator class and `make_grid`.
+- `eDens_mp2.py`: public generator, GPU kernels and memory planning.
 
 
 ## Reference

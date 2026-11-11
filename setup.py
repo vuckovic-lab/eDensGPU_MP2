@@ -6,14 +6,16 @@ from setuptools import setup
 
 
 setup(
-    name="MP2_edens_GPU",
+    name="eDensGPU_MP2",
     version="1.0",
     description="MP2 energy density generator for GPU-based implementation",
     long_description=Path(__file__).with_name("README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     license_files=["LICENSE*"],
     python_requires=">=3.11,<3.13",
-    packages=["mp2_edens"],
+    package_dir={"eDensGPU_MP2": "."},
+    packages=["eDensGPU_MP2"],
+    py_modules=["eDens_mp2"],
     install_requires=[
         "psutil>=5.9", "pyscf==2.14.0", "numpy==1.26.4", "scipy==1.15.3",
         "h5py==3.14.0", "opt_einsum==3.4.0",
