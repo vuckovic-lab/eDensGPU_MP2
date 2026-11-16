@@ -1,8 +1,4 @@
-"""Sections follow the data flow: orbitals, storage, density/integrals, and MP2.
-Contraction order, CUDA kernels, and GPU/RAM/disk planning are retained.
-The host-output adapters derive from GPU4PySCF (Apache-2.0; see LICENSE_GPU4PYSCF).
-The public generator at the end of this module is intended for normal use.
-"""
+""" MP2 Correlation Energy Density per Particle Generator using the GPU-based implementation of eDensGPU. """
 
 import ctypes
 import math
@@ -810,8 +806,7 @@ def semilocal(engine, coords):
 class ExchangeCoulombTiles:
     """Reusable rectangular integral workspace on the CUDA default stream.
 
-    GPU4PySCF 1.8.1's native fill_int2c2e kernel launches on that stream. Callers
-    must order input/output dependencies with it (see hartree_potential).
+    GPU4PySCF 1.8.1's native fill_int2c2e kernel launches on that stream.
     """
 
     def __init__(self, aux, block_points):
@@ -929,7 +924,7 @@ def host_cart_factors(
     vir_coeff_set : list of cupy.ndarray | list of numpy.ndarray
     j3c_ovl_cart_set : list of cupy.ndarray | list of numpy.ndarray
     aux_batch_size : int | None
-    log : gpupyscf.lib.logger.Logger, optional
+    log : gpu4pyscf.lib.logger.Logger, optional
 
     See also
     --------
