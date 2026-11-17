@@ -301,8 +301,7 @@ def grid_plan(
     """Minimize total grid passes, jointly choosing occupied and r tiles.
 
     Exact enumeration of the occupied choices under the stated live-array
-    bounds. Ties prefer fewer occupied passes, then larger r. If the full
-    workload fits both budgets, the answer is one occupied and one r block.
+    bounds. Ties prefer fewer occupied passes, then larger r. 
     """
     from math import ceil
 
@@ -340,7 +339,8 @@ def grid_plan(
 
 
 class DeviceStore:
-    """A single GPU owner, never mirrored by a full host array."""
+    """A single GPU process-local array, never spilled to disk.
+    The caller must respect the GPU memory allowance and the pool's live bytes."""
 
     def __init__(self, array, name):
         self.array = array
@@ -425,14 +425,7 @@ def plan_grid(n, gpu_per_point, host_per_point, gpu_available, host_available):
 
 
 def execution_plan(n, gp, hp, g, h, l2_bytes):
-    """Memory admission followed by a hardware-scaled allocation working set.
-
-    A memory ceiling is not a performance target: allocating tens of GiB for
-    one grid tile is slower than reusing a smaller tile on A100. The 64-cache
-    working set was selected by paired sweeps, not by changing AO screening.
-    Keep the memory-only minimum in metadata so extra execution tiles are
-    visible. Devices not reporting an L2 size retain the memory-only plan.
-    """
+    """Memory admission followed by a hardware-scaled allocation working set"""
     memory = plan_grid(n, gp, hp, g, h)
     working = min(g, 64 * int(l2_bytes)) if l2_bytes else g
     # A performance preference must never reject a memory-feasible point.
@@ -648,18 +641,13 @@ def _sorted_coeff(engine, opt, coeff):
 
     Its ``opt.coeff`` is ``eye(mol.nao)[opt._ao_idx]``. CuPy's gather
     (including the padded indices) therefore gives the identical transform.
-    No coefficient is screened, rounded or otherwise changed.
     """
     cp = engine.xp
     return cp.ascontiguousarray(coeff[cp.asarray(opt._ao_idx)].T)
 
 
 def _copy_rows(cp, source, destination, start, width, row_pitch):
-    """Copy contiguous device rows directly into final strided host rows.
-
-    Sizes and offsets are float64 elements. Synchronize the current stream
-    before its source owners can be reused; no pageable host staging array.
-    """
+    """Copy contiguous device rows directly into final strided host rows"""
     if not source.size:
         return
     cp.cuda.runtime.memcpy2DAsync(
@@ -675,128 +663,86 @@ def _copy_rows(cp, source, destination, start, width, row_pitch):
     cp.cuda.get_current_stream().synchronize()
 
 
-_SEMILOCAL = r"""
-extern "C" __global__ void semilocal_reduce(
- const double* m, const double* lap, int no, int nb,
- long long n, long long offset, double* rho, double* grad,
- double* tau, double* laprho) {
+_DENSITY = r"""
+extern "C" __global__ void density_reduce(
+ const double* m, int no, int nb, long long offset, double* rho) {
  int r=blockDim.x*blockIdx.x+threadIdx.x;
  if(r>=nb) return;
- double den=0., gx=0., gy=0., gz=0., kin=0., dl=0.;
- long long stride=(long long)no*nb;
+ double den=0.;
  for(int i=0;i<no;++i) {
    long long j=(long long)i*nb+r;
-   double v=m[j], x=m[stride+j], y=m[2*stride+j], z=m[3*stride+j];
-   den+=v*v; gx+=v*x; gy+=v*y; gz+=v*z;
-   kin+=x*x+y*y+z*z; dl+=v*lap[j];
+   double v=m[j];
+   den+=v*v;
  }
- long long k=offset+r;
- rho[k]=den; grad[3*k]=2*gx; grad[3*k+1]=2*gy; grad[3*k+2]=2*gz;
- tau[k]=0.5*kin; laprho[k]=2*(dl+kin);
+ rho[offset+r]=den;
 }
 """
 _DENSITY_REDUCE = None
-_TRACE = None
-_LAPLACIAN = r"""
-extern "C" __global__ void derivative_trace(double* a, long long size) {
- long long k=(long long)blockDim.x*blockIdx.x+threadIdx.x;
- if(k<size) a[4*size+k]=(a[4*size+k]+a[7*size+k])+a[9*size+k];
-}
-"""
 
 
 def semilocal(engine, coords):
-    global _DENSITY_REDUCE, _TRACE
+    """Return spin densities only; MP2 does not need AO derivatives.
+
+    Preserve occupied-orbital ordering and the sequential sum of squares.
+    Restricted orbitals supply identical alpha and beta densities.
+    """
+    global _DENSITY_REDUCE
 
     cp = engine.xp
     n = len(coords)
-    shapes = {"rho": (2, n), "grad_rho": (2, n, 3), "laplacian": (2, n), "tau": (2, n)}
-    with GridMemory(engine, "semilocal", 12 * n * 8) as memory:
-        out = {k: np.empty(shape, dtype=np.float64) for k, shape in shapes.items()}
+    with GridMemory(engine, "semilocal", 2 * n * 8) as memory:
+        rho = np.empty((2, n), dtype=np.float64)
         if not n:
-            return out
+            return {"rho": rho}
         opt = _opt(engine)
         coeff = [engine.c] if engine.restricted else engine.c
         occ = [engine.host_occ] if engine.restricted else engine.host_occ
-        # Allocate persistent native AO data before the large transient AO
-        # owners, so it cannot strand slices of those owners in the pool.
+        # Allocate persistent native AO data before transient workspaces.
         opt.envs_cache
         occupied = [
             _sorted_coeff(engine, opt, c[:, np.asarray(o) != 0]) for c, o in zip(coeff, occ)
         ]
         ns = len(opt._ao_idx)
         if _DENSITY_REDUCE is None:
-            _DENSITY_REDUCE = cp.RawKernel(_SEMILOCAL, "semilocal_reduce")
-        if _TRACE is None:
-            _TRACE = cp.RawKernel(_LAPLACIAN, "derivative_trace")
-        per_point = 8 * (10 * ns + 5 * max(len(c) for c in occupied) + 12 + 32)
+            _DENSITY_REDUCE = cp.RawKernel(_DENSITY, "density_reduce")
+        # AO values, occupied values, two spin outputs and native workspaces.
+        per_point = 8 * (ns + max(len(c) for c in occupied) + 2 + 32)
         resident = memory.device_outputs_fit(n, per_point)
         if resident:
-            gpu_out = {k: cp.empty(shape, dtype=cp.float64) for k, shape in shapes.items()}
+            gpu_rho = cp.empty((2, n), dtype=cp.float64)
 
         def evaluate(points, sl):
             nb = len(points)
-            a = engine._eval_ao(opt._sorted_mol, points, deriv=2, gdftopt=opt, transpose=False)
-            # The individual second derivatives are not used after the trace.
-            # Preserve (xx + yy) + zz exactly, while reusing the xx buffer.
-            # A direct kernel avoids CuPy's conservative overlap-copy for
-            # distinct derivative views sharing the same base allocation.
-            size = ns * nb
-            _TRACE(((size + 255) // 256,), (256,), (a, np.int64(size)))
-            lap = a[4]
-            values = (
-                gpu_out
-                if resident
-                else {
-                    k: cp.empty(
-                        (len(occupied), nb, 3) if k == "grad_rho" else (len(occupied), nb),
-                        dtype=cp.float64,
-                    )
-                    for k in out
-                }
-            )
+            a = engine._eval_ao(opt._sorted_mol, points, deriv=0, gdftopt=opt, transpose=False)
+            values = gpu_rho if resident else cp.empty((len(occupied), nb), dtype=cp.float64)
             for spin, c in enumerate(occupied):
-                m = cp.matmul(c, a[:4])
-                ml = c @ lap
+                m = cp.matmul(c, a)
                 _DENSITY_REDUCE(
                     ((nb + 127) // 128,),
                     (128,),
                     (
                         m,
-                        ml,
                         np.int32(len(c)),
                         np.int32(nb),
-                        np.int64(nb),
                         np.int64(spin * n + sl.start if resident else spin * nb),
-                        values["rho"],
-                        values["grad_rho"],
-                        values["tau"],
-                        values["laplacian"],
+                        values,
                     ),
                 )
-                del m, ml
+                del m
             if not resident:
-                for k, v in values.items():
-                    components = 3 if k == "grad_rho" else 1
-                    _copy_rows(
-                        cp, v, out[k], sl.start * components, nb * components, n * components
-                    )
+                _copy_rows(cp, values, rho, sl.start, nb, n)
 
-        # Ten AO derivatives, occupied values/derivatives,
-        # outputs and native coordinate/workspace owners; all float64.
         for sl, _ in memory.run(coords, per_point, 0, evaluate):
             pass
         if resident:
-            for key in out:
-                if engine.restricted:
-                    gpu_out[key][1] = gpu_out[key][0]
-                gpu_out[key].get(out=out[key])
-            del gpu_out
+            if engine.restricted:
+                gpu_rho[1] = gpu_rho[0]
+            gpu_rho.get(out=rho)
+            del gpu_rho
         elif engine.restricted:
-            for value in out.values():
-                value[1] = value[0]
+            rho[1] = rho[0]
         del occupied
-    return out
+    return {"rho": rho}
 
 
 # Finite-Gaussian Coulomb potentials
@@ -915,7 +861,7 @@ class ExchangeCoulombTiles:
 def host_cart_factors(
     intopt, occ_coeff_set, vir_coeff_set, j3c_ovl_cart_set, aux_batch_size, log=None
 ):
-    """Get 3-center overlap integrals in Cartesian basis on GPU by batch of auxiliary basis.
+    """Evaluates three-center two-electron Coulomb integrals in Cartesian basis on GPU by batch of auxiliary basis.
 
     Parameters
     ----------
@@ -1049,7 +995,7 @@ def host_spherical_factors(intopt, j3c_ovl_cart_set, batch_ov_size, j3c_ovl_set=
     --------
     get_j3c_ovl_gpu_bdiv
     """
-    from gpu4pyscf.mp.dfmp2_addons import cp, np, cupy, logger, ndarray, contract
+    from gpu4pyscf.mp.dfmp2_addons import cp, np, cupy, logger, ndarray
 
     mol = intopt.mol.mol
     aux = intopt.auxmol.mol
@@ -1224,13 +1170,7 @@ _PACKED_KERNEL_MAX_BYTES = 256 * 1024**2
 
 
 def contract_field(potential, kernel, occupied, virtual, out, available, stats):
-    """Larger FP64 GEMM plus a bounded fused reduction of the same orbital sum.
-
-    Small kernels combine occupied rows using the largest legal scratch
-    matrix. Large kernels retain the original occupied GEMMs, which measured
-    faster on A100 while reusing the same resident data and grid tile. No full grid x occupied x virtual array survives a
-    batch and no such array is transferred to the host.
-    """
+    """Larger FP64 GEMM plus a bounded fused reduction of the same orbital sum"""
     import cupy as cp
 
     global _FIELD_REDUCE
@@ -1345,12 +1285,7 @@ def disk_plan(
     start=0,
     cap=None,
 ):
-    """Minimize observation batches times partner/virtual tiles jointly.
-
-    For each distinct ceil(no / batch), its smallest sufficient batch leaves
-    the most space for partner tiles. Testing those choices is equivalent to
-    testing every observation-batch size under this live-array bound.
-    """
+    """Minimize observation batches times partner/virtual tiles jointly"""
     plane = nv * q * 8
     fixed = 16 * MIB + max(nkeys, 3) * plane
     extra_keys = 0 if kernels_resident else nkeys
@@ -1963,7 +1898,7 @@ class _FactorUploader:
 
     Direct cudaHostAlloc avoids power-of-two pool rounding and never changes
     the caller's pinned allocator. HDF5 reads directly into this buffer, with
-    no intermediate pageable tile. Upload completion precedes every reuse.
+    no intermediate pageable tile. 
     """
 
     def __init__(self, limit):
@@ -2056,7 +1991,18 @@ __all__ = ["ec_mp2_gen", "make_grid"]
 
 
 def make_grid(mol, level=3):
-    """Return (coordinates in bohr, weights) using the PySCF-based Becke generation."""
+    """
+    Generate a grid with integration weights using the PySCF-based Becke generation.
+    
+    Input:
+    mol:            A PySCF molecule object for which to generate the grid.
+    level=3:        The level of the grid, which determines the number of points.
+    
+    Output:
+    coords:         A NumPy array of shape (N, 3) containing the grid coordinates.
+    weights:        A NumPy array of shape (N,) containing the integration weights.
+    """
+    
     from pyscf.dft import radi
 
     grid = dft.gen_grid.Grids(mol)
@@ -2072,13 +2018,29 @@ def make_grid(mol, level=3):
 
 
 class ec_mp2_gen:
-    """Run κMP2 energy density generator and retain total and opposite-spin results.
-
-    ``tot`` and ``os`` are energies in Hartree.
-    ``dens_tot`` and ``dens_os`` are energy densities per particle (float64 CuPy
-    arrays). ``rho``, ``weights`` and ``coords`` are also float64 CuPy arrays.
-
-    Supply converged SCF orbitals. A CUDA GPU is required; no CPU fallback.
+    """MP2 energy density generator
+    
+    *args: 
+    mf:                 A converged SCF object.
+    mol:                The molecule for which to compute the MP2 energy density.
+    grid:               The grid on which to evaluate the energy density.
+    weights:            Integration weights corresponding to the grid.
+    
+    *kwargs:
+    kappa = 2.0:                Regularization parameter for κMP2. Must be a positive finite number.
+    auxbasis = "def2tzvpri":    Auxiliary basis set for correlation-based density fitting. 
+    gpu_mem_gb = None:          Maximum GPU memory to use in GB. If None, uses 80% of available GPU memory.
+    host_mem_gb = None:         Maximum host memory to use in GB. If None, uses all available host memory.
+    verbose = False:            If True, prints progress information during computation.
+    
+    Creates an instance with the following attributes:
+    tot:               Total MP2 correlation energy in Hartree.
+    os:                Opposite-spin MP2 correlation energy in Hartree.
+    dens_tot:          Total MP2 correlation energy density per particle.
+    dens_os:           Opposite-spin MP2 correlation energy density per particle.
+    rho:               Electron density.
+    weights:           Integration weights.
+    coords:            Grid coordinates.
     """
 
     def __init__(
@@ -2192,13 +2154,11 @@ def _evaluate(mf, coords, kappa, auxbasis, gpu_mem_gb, host_mem_gb, verbose):
 
 
 def _accumulate_group(
-    engine, factors, co, cv, eo, ev, chol, keys, arena, pool, budget, pair_cap, progress, stats
+    engine, factors, eo, ev, chol, keys, arena, pool, budget, pair_cap, progress, stats
 ):
     import cupy as cp
     from cupyx.scipy.linalg import solve_triangular
 
-    # Do not split a freed factor-build workspace behind small persistent K
-    # or metric-transpose allocations at the start of this phase.
     _clear(engine, pool)
     q = chol.shape[0]
     total_kernel_bytes = sum(np.prod(f.shape, dtype=np.int64) * 8 for f in factors) * len(keys)
@@ -2224,9 +2184,6 @@ def _accumulate_group(
         }
     )
     analytic = {key: 0.0 for key in keys}
-    fbytes = sum(np.prod(f.shape, dtype=np.int64) * 8 for f in factors)
-    maxv = max(f.shape[1] for f in factors)
-    reserve = (len(keys) + 5) * maxv * q * 8 + maxv * maxv * 64 + 32 * MIB
     cached = [f.array for f in factors] if all(f.kind == "gpu" for f in factors) else None
     chol_t = cp.asfortranarray(chol.T)
     if cached is None:
@@ -2250,8 +2207,6 @@ def _accumulate_group(
     reported_plans = set()
 
     def occupied(s, i, nv, f, fraction):
-        # Previous pair buffers are now dead. Clear them before allocating
-        # small per-orbital arrays that could strand their remaining space.
         _clear(engine, pool)
         local_energy = {}
         fi = cached[s][i] if cached is not None else staging.upload(f, i)
@@ -2498,7 +2453,7 @@ def _grid_group(
             )
         return max(stages.values()) * 8, {k: v * 8 for k, v in stages.items()}
 
-    def evaluate(s, spin, i0, ik, per_point, planned_r):
+    def evaluate(s, spin, i0, ik, planned_r):
         i1 = i0 + ik
         kernels = {}
         for key, store in spin.items():
@@ -2524,9 +2479,6 @@ def _grid_group(
                 for sl, points, potential in potential_blocks(
                     engine, aux, coords[restart:], stats, layout, planned_points=rblock
                 ):
-                    # The generator has now released its previous potential.
-                    # Purge unused cache before AO allocations can split that
-                    # large buffer and strand memory needed by the contraction.
                     _clear(engine, pool)
                     ao = engine.ao(engine.mol, points)
                     po = ao @ co[s][:, i0:i1]
@@ -2624,7 +2576,7 @@ def _grid_group(
                 stats["native_potential_point_limit"] = layout["point_limit"]
             while True:
                 try:
-                    local = evaluate(s, spin, i0, ik, per_point, planned_r)
+                    local = evaluate(s, spin, i0, ik, planned_r)
                     for key, value in local.items():
                         numerators[key] += value
                     del local, value
@@ -2712,8 +2664,6 @@ def streamed_fields(
             stores, energy = _accumulate_group(
                 engine,
                 factors,
-                co,
-                cv,
                 eo,
                 ev,
                 chol,
